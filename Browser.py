@@ -1,12 +1,17 @@
+import time
+import gzip
 from html import entities
 import socket
 import ssl
+
+cache_safe = {}
 
 
 def request(url):
     """
     Get request to url and return headers and body
     """
+    show_source = False
     if url[: len("view-source:")] == "view-source:":
         show_source = True
         url = url[len("view-source:") :]
@@ -23,8 +28,11 @@ def request(url):
 
     port = 80 if scheme == "http" else 443
 
+    if url in cache_safe and cache_safe[url].max_age < time.time():
+        return cache_safe[url].headers, cache_safe[url].body, show_source
+
     # Split host part from path
-    host, path = url.split("/", 2)
+    host, path = url.split("/", 1)
     path = "/" + path
 
     # Init socket
@@ -48,6 +56,7 @@ def request(url):
     headers = {
         "Host": host,
         "Connection": "close",
+        "Accept-Encoding": "gzip, chunked",
         "User-Agent": "Best fucking browser",
     }
 
@@ -60,27 +69,68 @@ def request(url):
         f"GET {path} HTTP/1.1\r\n".encode("utf8") + f"{headerString}\r\n".encode("utf8")
     )
 
-    response = s.makefile("r", encoding="utf8", newline="\r\n")
+    response = s.makefile("rb", newline="\r\n")
 
-    statusline = response.readline()
+    statusline = response.readline().decode(encoding="utf8")
     version, status, explanation = statusline.split(" ", 2)
-    assert status == "200", f"{status}: {explanation}"
+
+    assert status == "200" or status[:1] == "3", f"{status}: {explanation}"
 
     # Read all headers and save normalized to lowercase and w/o whitespace
     headers = {}
     while True:
-        line = response.readline()
+        line = response.readline().decode(encoding="utf8")
         if line == "\r\n":
             break
         header, value = line.split(":", 1)
         headers[header.lower()] = value.strip()
 
+    if status[:1] == "3":
+        print("Redirecting to " + headers["location"])
+        return request(headers["location"])
+
     # We can't handle encoded content
-    assert "transfer-encoding" not in headers
+
+    if "transfer-encoding" in headers and headers["transfer-encoding"] == "chunked":
+        data = bytearray()
+        while True:
+            line = response.readline()
+            size = int(line, 16)
+            if size == 0:
+                break
+            chunk = response.read(size)
+            data += chunk
+            response.readline()  # throw away line? idk
+    else:
+        data = response.read()
+
+    # assert "transfer-encoding" not in headers
+
+    if "content-encoding" in headers and headers["content-encoding"] == "gzip":
+        body = gzip.decompress(data).decode(encoding="utf8")
+        cache(headers, body, url)
+        return headers, body, show_source
+
     assert "content-encoding" not in headers
 
-    body = response.read()
+    body = data.decode(encoding="utf8")
+    cache(headers, body, url)
     return headers, body, show_source
+
+
+def cache(headers, body, url):
+    if "cache-control" in headers:
+        cache_control = headers["cache-control"].split(",")
+        for value in cache_control:
+            if value.split("=")[0] != "max-age":
+                return
+            else:
+                max_age = int(value.split("=")[1])
+        if max_age:
+            cache_safe[url] = {
+                "body": body,
+                "max_age": max_age + time.time(),
+            }
 
 
 def show(body):
@@ -117,13 +167,24 @@ def show(body):
             print(c, end="")
 
 
-def source_show(body):
-    print(body)
+def tranform_source(body):
+    out = "<body>"
+    replace = {"<": "&lt;", ">": "&gt;", "&": "&amp;"}
+    for c in body:
+        if c in replace:
+            out += replace[c]
+        else:
+            out += c
+
+    out += "</body>"
+    return out
 
 
 def load(url):
     headers, body, show_source = request(url)
-    source_show(body) if show_source else show(body)
+    if show_source:
+        body = tranform_source(body)
+    show(body)
 
 
 if __name__ == "__main__":

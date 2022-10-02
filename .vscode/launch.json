@@ -11,7 +11,7 @@
       "program": "${file}",
       "console": "integratedTerminal",
       "justMyCode": true,
-      "args": ["view-source:data:text/html,<body>text</body>"]
+      "args": ["https://example.org/"]
     }
   ]
 }
