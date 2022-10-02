@@ -1,14 +1,27 @@
+from html import entities
 import socket
 import ssl
 
 
 def request(url):
     """
-        Get request to url and return headers and body
+    Get request to url and return headers and body
     """
-    # Expect use of a http:// domain
-    assert url.startswith("http://")
-    url = url[len("http://"):]
+    if url[: len("view-source:")] == "view-source:":
+        show_source = True
+        url = url[len("view-source:") :]
+
+    if url[: len("data:text/html,")] == "data:text/html,":
+        return {}, url[len("data:text/html,") :], show_source
+
+    # get scheme
+    scheme, url = url.split("://", 1)
+    assert scheme in ["http", "https", "file"], f"Unknown scheme {scheme}"
+
+    if scheme == "file":
+        return {}, open(url).read(), show_source
+
+    port = 80 if scheme == "http" else 443
 
     # Split host part from path
     host, path = url.split("/", 2)
@@ -21,11 +34,31 @@ def request(url):
         proto=socket.IPPROTO_TCP,
     )
 
-    # Connect to host using socket
-    s.connect((host, 80))
+    if scheme == "https":
+        ctx = ssl.create_default_context()
+        s = ctx.wrap_socket(s, server_hostname=host)
 
-    s.send(f"GET {path} HTTP/1.0\r\n".encode("utf8") +
-           f"Host: {host}\r\n\r\n".encode("utf8"))
+    if ":" in host:
+        host, port = host.split(":", 1)
+        port = int(port)
+
+    # Connect to host using socket
+    s.connect((host, port))
+
+    headers = {
+        "Host": host,
+        "Connection": "close",
+        "User-Agent": "Best fucking browser",
+    }
+
+    headerString = ""
+
+    for header in headers:
+        headerString += f"{header}: {headers[header]}\r\n"
+
+    s.send(
+        f"GET {path} HTTP/1.1\r\n".encode("utf8") + f"{headerString}\r\n".encode("utf8")
+    )
 
     response = s.makefile("r", encoding="utf8", newline="\r\n")
 
@@ -47,25 +80,53 @@ def request(url):
     assert "content-encoding" not in headers
 
     body = response.read()
-    return headers, body
+    return headers, body, show_source
 
 
 def show(body):
     in_angle = False
+    in_body = False
+    in_entitie = False
+    current_tag = ""
+    current_entitie = ""
     for c in body:
         if c == "<":
+            current_tag = ""
             in_angle = True
         elif c == ">":
+            if current_tag[:4] == "body":
+                in_body = True
+            elif current_tag[:5] == "/body":
+                in_body = False
             in_angle = False
-        elif not in_angle:
+        elif c == "&":
+            in_entitie = True
+            current_entitie = ""
+        elif c == ";" and in_entitie:
+            current_entitie += c
+            in_entitie = False
+            if current_entitie in entities.html5:
+                print(entities.html5[current_entitie], end="")
+            else:
+                print(f"&{current_entitie};", end="")
+        elif in_entitie:
+            current_entitie += c
+        elif in_angle:
+            current_tag += c
+        elif not in_angle and in_body:
             print(c, end="")
 
 
+def source_show(body):
+    print(body)
+
+
 def load(url):
-    headers, body = request(url)
-    show(body)
+    headers, body, show_source = request(url)
+    source_show(body) if show_source else show(body)
 
 
 if __name__ == "__main__":
     import sys
+
     load(sys.argv[1])
