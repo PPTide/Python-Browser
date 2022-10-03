@@ -8,10 +8,16 @@
       "name": "Python: Current File",
       "type": "python",
       "request": "launch",
-      "program": "${file}",
+      "program": "Browser.py",
       "console": "integratedTerminal",
       "justMyCode": true,
-      "args": ["https://example.org/"]
+      "args": [
+        //"https://browser.engineering/examples/xiyouji.html"
+        //"https://pptie.de/"
+        //"file:///Users/pptide/index.html"
+        "https://browser.engineering/preface.html"
+        //"data:text/html,<body>😮</body>"
+      ]
     }
   ]
 }

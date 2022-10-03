@@ -1,10 +1,45 @@
-import time
 import gzip
-from html import entities
 import socket
 import ssl
+import time
+import tkinter
+import tkinter.font
+from html import entities
 
 cache_safe = {}
+
+WIDTH, HEIGHT = 800, 600
+HSTEP, VSTEP = 13, 18
+SCROLL_STEP = 100
+MOUSE_SCROLL_STEP = 10
+
+
+def lex_entities(text):
+    in_entity = False
+    current_entity = ""
+    out = ""
+    for c in text:
+        if c == "&":
+            in_entity = True
+        elif c == ";":
+            in_entity = False
+            current_entity += c
+            if current_entity in entities.html5:
+                out += entities.html5[current_entity]
+            else:
+                out += "&" + current_entity
+            current_entity = ""
+        elif in_entity and c == " ":
+            in_entity = False
+            out += "&" + current_entity
+            current_entity = ""
+        elif in_entity:
+            current_entity += c
+        else:
+            out += c
+    if current_entity:
+        out += "&" + current_entity
+    return out
 
 
 def request(url):
@@ -108,12 +143,16 @@ def request(url):
 
     if "content-encoding" in headers and headers["content-encoding"] == "gzip":
         body = gzip.decompress(data).decode(encoding="utf8")
+        if show_source:
+            body = tranform_source(body)
         cache(headers, body, url)
         return headers, body, show_source
 
     assert "content-encoding" not in headers
 
     body = data.decode(encoding="utf8")
+    if show_source:
+        body = tranform_source(body)
     cache(headers, body, url)
     return headers, body, show_source
 
@@ -133,40 +172,6 @@ def cache(headers, body, url):
             }
 
 
-def show(body):
-    in_angle = False
-    in_body = False
-    in_entitie = False
-    current_tag = ""
-    current_entitie = ""
-    for c in body:
-        if c == "<":
-            current_tag = ""
-            in_angle = True
-        elif c == ">":
-            if current_tag[:4] == "body":
-                in_body = True
-            elif current_tag[:5] == "/body":
-                in_body = False
-            in_angle = False
-        elif c == "&":
-            in_entitie = True
-            current_entitie = ""
-        elif c == ";" and in_entitie:
-            current_entitie += c
-            in_entitie = False
-            if current_entitie in entities.html5:
-                print(entities.html5[current_entitie], end="")
-            else:
-                print(f"&{current_entitie};", end="")
-        elif in_entitie:
-            current_entitie += c
-        elif in_angle:
-            current_tag += c
-        elif not in_angle and in_body:
-            print(c, end="")
-
-
 def tranform_source(body):
     out = "<body>"
     replace = {"<": "&lt;", ">": "&gt;", "&": "&amp;"}
@@ -180,14 +185,139 @@ def tranform_source(body):
     return out
 
 
-def load(url):
-    headers, body, show_source = request(url)
-    if show_source:
-        body = tranform_source(body)
-    show(body)
+class Browser:
+    def lex(self, body):
+        out = []
+        text = ""
+        in_tag = False
+        for c in body:
+            if c == "<":
+                in_tag = True
+                if text:
+                    out.append(Text(text))
+                text = ""
+            elif c == ">":
+                in_tag = False
+                out.append(Tag(text))
+                text = ""
+            else:
+                text += c
+        if not in_tag and text:
+            out.append(Text(text))
+        return out
+
+    def load(self, url):
+        headers, body, show_source = request(url)
+        self.tokens = self.lex(body)
+        self.display_list = Layout(self.tokens).display_list
+        self.draw()
+
+    def draw(self):
+        self.canvas.delete("all")
+        for x, y, word, font in self.display_list:
+            if y > self.scroll + self.height:
+                continue
+            if y + VSTEP < self.scroll:
+                continue
+            self.canvas.create_text(
+                x, y - self.scroll, text=word, font=font, anchor="nw"
+            )
+
+    def __init__(self) -> None:
+        self.window = tkinter.Tk()
+        self.canvas = tkinter.Canvas(
+            self.window,
+            width=WIDTH,
+            height=HEIGHT,
+        )
+        self.canvas.pack(expand=True, fill=tkinter.BOTH)
+        self.scroll = 0
+        self.width, self.height = WIDTH, HEIGHT
+        self.window.bind("<Up>", self.scrollup)
+        self.window.bind("<Down>", self.scrolldown)
+        self.window.bind("<MouseWheel>", self.scroll_mouse)
+        self.window.bind("<Configure>", self.configure)
+
+    def configure(self, e):
+        self.width, self.height = e.width, e.height
+        self.display_list = Layout(
+            self.tokens, width=e.width, height=e.height
+        ).display_list
+        self.draw()
+
+    def scroll_mouse(self, e):
+        self.scroll -= e.delta * MOUSE_SCROLL_STEP
+        if self.scroll < 0:
+            self.scroll = 0
+        self.draw()
+
+    def scrollup(self, e):
+        self.scroll -= SCROLL_STEP
+        if self.scroll < 0:
+            self.scroll = 0
+        self.draw()
+
+    def scrolldown(self, e):
+        self.scroll += SCROLL_STEP
+        self.draw()
+
+
+class Layout:
+    def __init__(self, tokens, width=WIDTH, height=HEIGHT) -> None:
+        self.display_list = []
+        self.cursor_x = HSTEP
+        self.cursor_y = VSTEP
+        self.width, self.height = width, height
+        self.weight = "normal"
+        self.style = "roman"
+        self.size = 16
+        for tok in tokens:
+            self.token(tok)
+
+    def token(self, tok):
+        if isinstance(tok, Text):
+            self.text(tok)
+        elif tok.tag == "i":
+            style = "italic"
+        elif tok.tag == "/i":
+            style = "roman"
+        elif tok.tag == "b":
+            weight = "bold"
+        elif tok.tag == "/b":
+            weight = "normal"
+        elif tok.tag == "br":
+            self.cursor_y += (
+                tkinter.font.Font(size=self.size).metrics("linespace") * 1.25
+            )
+            self.cursor_x = HSTEP
+
+    def text(self, tok):
+        font = tkinter.font.Font(
+            size=self.size,
+            weight=self.weight,
+            slant=self.style,
+        )
+        for word in tok.text.split():
+            w = font.measure(word)
+            if self.cursor_x + w > self.width - HSTEP:
+                self.cursor_y += font.metrics("linespace") * 1.25
+                self.cursor_x = HSTEP
+            self.display_list.append((self.cursor_x, self.cursor_y, word, font))
+            self.cursor_x += w + font.measure(" ")
+
+
+class Text:
+    def __init__(self, text) -> None:
+        self.text = lex_entities(text)
+
+
+class Tag:
+    def __init__(self, tag) -> None:
+        self.tag = tag
 
 
 if __name__ == "__main__":
     import sys
 
-    load(sys.argv[1])
+    Browser().load(sys.argv[1])
+    tkinter.mainloop()
