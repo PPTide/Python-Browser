@@ -12,6 +12,35 @@ WIDTH, HEIGHT = 800, 600
 HSTEP, VSTEP = 13, 18
 SCROLL_STEP = 100
 MOUSE_SCROLL_STEP = 10
+SELF_CLOSING_TAGS = [
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+]
+FONTS = {}
+
+
+def get_font(size, weight, slant):
+    key = (size, weight, slant)
+    if key not in FONTS:
+        font = tkinter.font.Font(
+            size=size,
+            weight=weight,
+            slant=slant,
+        )
+        FONTS[key] = font
+    return FONTS[key]
 
 
 def lex_entities(text):
@@ -21,7 +50,7 @@ def lex_entities(text):
     for c in text:
         if c == "&":
             in_entity = True
-        elif c == ";":
+        elif c == ";" and in_entity:
             in_entity = False
             current_entity += c
             if current_entity in entities.html5:
@@ -185,31 +214,17 @@ def tranform_source(body):
     return out
 
 
-class Browser:
-    def lex(self, body):
-        out = []
-        text = ""
-        in_tag = False
-        for c in body:
-            if c == "<":
-                in_tag = True
-                if text:
-                    out.append(Text(text))
-                text = ""
-            elif c == ">":
-                in_tag = False
-                out.append(Tag(text))
-                text = ""
-            else:
-                text += c
-        if not in_tag and text:
-            out.append(Text(text))
-        return out
+def print_tree(node, indent=0):
+    print(" " * indent, node)
+    for child in node.children:
+        print_tree(child, indent + 2)
 
+
+class Browser:
     def load(self, url):
         headers, body, show_source = request(url)
-        self.tokens = self.lex(body)
-        self.display_list = Layout(self.tokens).display_list
+        self.nodes = HTMLParser(body).parse()
+        self.display_list = Layout(self.nodes).display_list
         self.draw()
 
     def draw(self):
@@ -241,7 +256,7 @@ class Browser:
     def configure(self, e):
         self.width, self.height = e.width, e.height
         self.display_list = Layout(
-            self.tokens, width=e.width, height=e.height
+            self.nodes, width=e.width, height=e.height
         ).display_list
         self.draw()
 
@@ -263,61 +278,208 @@ class Browser:
 
 
 class Layout:
-    def __init__(self, tokens, width=WIDTH, height=HEIGHT) -> None:
+    def __init__(self, nodes, width=WIDTH, height=HEIGHT) -> None:
         self.display_list = []
+        self.line = []
         self.cursor_x = HSTEP
         self.cursor_y = VSTEP
         self.width, self.height = width, height
         self.weight = "normal"
         self.style = "roman"
         self.size = 16
-        for tok in tokens:
-            self.token(tok)
+        self.recurse(nodes)
+        self.flush()
 
-    def token(self, tok):
-        if isinstance(tok, Text):
-            self.text(tok)
-        elif tok.tag == "i":
-            style = "italic"
-        elif tok.tag == "/i":
+    def open_tag(self, tag):
+        if tag == "i":
+            self.style = "italic"
+        elif tag == "b":
+            self.weight = "bold"
+        elif tag == "small":
+            self.size -= 2
+        elif tag == "big":
+            self.size += 4
+        elif tag == "br":
+            self.flush()
+
+    def close_tag(self, tag):
+        if tag == "i":
             style = "roman"
-        elif tok.tag == "b":
-            weight = "bold"
-        elif tok.tag == "/b":
+        elif tag == "b":
             weight = "normal"
-        elif tok.tag == "br":
-            self.cursor_y += (
-                tkinter.font.Font(size=self.size).metrics("linespace") * 1.25
-            )
-            self.cursor_x = HSTEP
+        elif tag == "small":
+            self.size += 2
+        elif tag == "big":
+            self.size -= 4
+        elif tag == "p":
+            self.flush()
+            self.cursor_y + VSTEP
+
+    def recurse(self, tree):
+        if isinstance(tree, Text):
+            self.text(tree)
+        else:
+            self.open_tag(tree.tag)
+            for child in tree.children:
+                self.recurse(child)
+            self.close_tag(tree.tag)
+
+    def flush(self):
+        if not self.line:
+            return
+        metrics = [font.metrics() for x, word, font in self.line]
+        max_ascent = max([metric["ascent"] for metric in metrics])
+        max_descent = max([metric["descent"] for metric in metrics])
+        baseline = self.cursor_y + 1.25 * max_ascent
+        for x, word, font in self.line:
+            y = baseline - font.metrics("ascent")
+            self.display_list.append((x, y, word, font))
+        self.cursor_x = HSTEP
+        self.cursor_y = baseline + 1.25 * max_descent
+        self.line = []
 
     def text(self, tok):
-        font = tkinter.font.Font(
-            size=self.size,
-            weight=self.weight,
-            slant=self.style,
-        )
+        font = get_font(self.size, self.weight, self.style)
         for word in tok.text.split():
             w = font.measure(word)
             if self.cursor_x + w > self.width - HSTEP:
-                self.cursor_y += font.metrics("linespace") * 1.25
-                self.cursor_x = HSTEP
-            self.display_list.append((self.cursor_x, self.cursor_y, word, font))
+                self.flush()
+            self.line.append((self.cursor_x, word, font))
             self.cursor_x += w + font.measure(" ")
 
 
+class HTMLParser:
+    HEAD_TAGS = [
+        "base",
+        "basefont",
+        "bgsound",
+        "noscript",
+        "link",
+        "meta",
+        "title",
+        "style",
+        "script",
+    ]
+
+    def __init__(self, body) -> None:
+        self.body = body
+        self.unfinished = []
+
+    def implicit_tags(self, tag):
+        while True:
+            open_tags = [node.tag for node in self.unfinished]
+            if open_tags == [] and tag != "html":
+                self.add_tag("html")
+            elif open_tags == ["html"] and tag not in ["head", "body", "/html"]:
+                if tag in self.HEAD_TAGS:
+                    self.add_tag("head")
+                else:
+                    self.add_tag("body")
+            elif (
+                open_tags == ["html", "head"] and tag not in ["/head"] + self.HEAD_TAGS
+            ):
+                self.add_tag("/head")
+            else:
+                break
+
+    def add_text(self, text):
+        if text.isspace():
+            return
+        self.implicit_tags(None)
+        parent = self.unfinished[-1]
+        node = Text(text, parent)
+        parent.children.append(node)
+
+    def add_tag(self, tag):
+        tag, attributes = self.get_attributes(tag)
+        if tag.startswith("!"):
+            return
+        self.implicit_tags(tag)
+        if tag.startswith("/"):
+            if len(self.unfinished) == 1:
+                return
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        elif (tag in SELF_CLOSING_TAGS) or tag.endswith("/"):
+            parent = self.unfinished[-1]
+            node = Element(tag, attributes, parent)
+            parent.children.append(node)
+        else:
+            parent = self.unfinished[-1] if self.unfinished else None
+            node = Element(tag, attributes, parent)
+            self.unfinished.append(node)
+
+    def get_attributes(self, text):
+        parts = text.split()
+        tag = parts[0].lower()
+        attributes = {}
+        for attrpair in parts[1:]:
+            if "=" in attrpair:
+                key, value = attrpair.split("=", 1)
+                if len(value) > 2 and value[0] in ["'", '"']:
+                    value = value[1:-1]
+                attributes[key.lower()] = value
+            else:
+                attributes[attrpair.lower()] = ""
+        return tag, attributes
+
+    def finish(self):
+        if len(self.unfinished):
+            self.add_tag("html")
+        while len(self.unfinished) > 1:
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        return self.unfinished.pop()
+
+    def parse(self):
+        text = ""
+        in_tag = False
+        for c in self.body:
+            if c == "<":
+                in_tag = True
+                if text:
+                    self.add_text(text)
+                text = ""
+            elif c == ">":
+                in_tag = False
+                self.add_tag(text)
+                text = ""
+            else:
+                text += c
+        if not in_tag and text:
+            self.add_text(text)
+        return self.finish()
+
+
 class Text:
-    def __init__(self, text) -> None:
+    def __init__(self, text, parent) -> None:
         self.text = lex_entities(text)
+        self.parent = parent
+        self.children = []
+
+    def __repr__(self) -> str:
+        return repr(self.text)
 
 
-class Tag:
-    def __init__(self, tag) -> None:
+class Element:
+    def __init__(self, tag, attributes, parent) -> None:
         self.tag = tag
+        self.attributes = attributes
+        self.parent = parent
+        self.children = []
+
+    def __repr__(self) -> str:
+        return f"<{self.tag}>"
 
 
 if __name__ == "__main__":
     import sys
+
+    # headers, body, _ = request(sys.argv[1])
+    # nodes = HTMLParser(body).parse()
+    # print_tree(nodes)
 
     Browser().load(sys.argv[1])
     tkinter.mainloop()
