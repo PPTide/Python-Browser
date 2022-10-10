@@ -391,9 +391,9 @@ class HTMLParser:
         parent.children.append(node)
 
     def add_tag(self, tag):
-        tag, attributes = self.get_attributes(tag)
         if tag.startswith("!"):
             return
+        tag, attributes = self.get_attributes(tag)
         self.implicit_tags(tag)
         if tag.startswith("/"):
             if len(self.unfinished) == 1:
@@ -436,12 +436,31 @@ class HTMLParser:
     def parse(self):
         text = ""
         in_tag = False
+        comment = 0
         for c in self.body:
-            if c == "<":
+            if comment in [1, 2]:
+                if c == "-":
+                    comment += 1
+                    continue
+                else:
+                    comment = 0
+            if comment in [3, 4]:
+                if c == "-":
+                    comment += 1
+                else:
+                    comment = 3
+            elif comment == 5:
+                if c == ">":
+                    comment = 0
+                else:
+                    comment = 3
+            elif c == "<":
                 in_tag = True
                 if text:
                     self.add_text(text)
                 text = ""
+            elif c == "!" and in_tag and text == "":
+                comment = 1
             elif c == ">":
                 in_tag = False
                 self.add_tag(text)
